@@ -12,6 +12,7 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_from_disk
 import torch
+import shutil
 
 import bitsandbytes as bnb
 from huggingface_hub import login, HfFolder
@@ -27,10 +28,16 @@ def parse_arge():
         help="Model id to use for training.",
     )
     parser.add_argument(
-        "--dataset_path", type=str, default="lm_dataset", help="Path to dataset."
+        "--train_dataset_path", type=str, default="lm_dataset", help="Path to training dataset."
     )
     parser.add_argument(
-        "--hf_token", type=str, default=HfFolder.get_token(), help="Path to dataset."
+        "--val_dataset_path", type=str, default="lm_dataset", help="Path to validation dataset."
+    )
+    parser.add_argument(
+        "--output_data_path", type=str, default="lm_dataset", help="Path to store output data."
+    )
+    parser.add_argument(
+        "--hf_token", type=str, default=HfFolder.get_token(), help="Hugging Face Token."
     )
     # add training hyperparameters for epochs, batch size, learning rate, and seed
     parser.add_argument(
@@ -65,6 +72,24 @@ def parse_arge():
         type=bool,
         default=True,
         help="Whether to merge LoRA weights with base model.",
+    )
+    parser.add_argument(
+        "--lora_r",
+        type=int,
+        default=64,
+        help="LoRA Config - lora_r Value",
+    )
+    parser.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=16,
+        help="LoRA Config - lora_alpha Value",
+    )
+    parser.add_argument(
+        "--lora_dropout",
+        type=float,
+        default=0.1,
+        help="LoRA Config - lora_r Value",
     )
     args, _ = parser.parse_known_args()
 
@@ -111,7 +136,7 @@ def find_all_linear_names(model):
     return list(lora_module_names)
 
 
-def create_peft_model(model, gradient_checkpointing=True, bf16=True):
+def create_peft_model(model, args, gradient_checkpointing=True, bf16=True):
     from peft import (
         get_peft_model,
         LoraConfig,
@@ -128,14 +153,15 @@ def create_peft_model(model, gradient_checkpointing=True, bf16=True):
         model.gradient_checkpointing_enable()
 
     # get lora target modules
-    modules = find_all_linear_names(model)
-    print(f"Found {len(modules)} modules to quantize: {modules}")
+    # modules = find_all_linear_names(model)
+    # print(f"Found {len(modules)} modules to quantize: {modules}")
+    lora_modules = ["q_proj","v_proj","k_proj","o_proj",]
 
     peft_config = LoraConfig(
-        r=64,
-        lora_alpha=16,
-        target_modules=modules,
-        lora_dropout=0.1,
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        target_modules=lora_modules,
+        lora_dropout=args.lora_dropout,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
@@ -157,12 +183,31 @@ def create_peft_model(model, gradient_checkpointing=True, bf16=True):
     model.print_trainable_parameters()
     return model
 
+def print_files(path):
+    # import python modules
+    import os
+    print(f"*** {path} ***")
+    # Get list of all files only in the given directory
+    fun = lambda x : os.path.isfile(os.path.join(path,x))
+    files_list = filter(fun, os.listdir(path))
+    
+    # Create a list of files in directory along with the size
+    size_of_file = [
+        (f,os.stat(os.path.join(path, f)).st_size)
+        for f in files_list
+    ]
+    # Iterate over list of files along with size
+    # and print them one by one.
+    for f,s in size_of_file:
+        print("{} : {}MB".format(f, round(s/(1024*1024),3)))
 
 def training_function(args):
     # set seed
     set_seed(args.seed)
 
-    dataset = load_from_disk(args.dataset_path)
+    train_dataset = load_from_disk(args.train_dataset_path)
+    val_dataset = load_from_disk(args.val_dataset_path)
+    val_set_size = len(val_dataset)
     # load model from the hub with a bnb config
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -182,7 +227,7 @@ def training_function(args):
 
     # create peft config
     model = create_peft_model(
-        model, gradient_checkpointing=args.gradient_checkpointing, bf16=args.bf16
+        model, args, gradient_checkpointing=args.gradient_checkpointing, bf16=args.bf16
     )
 
     # Define training args
@@ -194,8 +239,11 @@ def training_function(args):
         learning_rate=args.lr,
         num_train_epochs=args.epochs,
         gradient_checkpointing=args.gradient_checkpointing,
+        # adding evaluation to model
+        evaluation_strategy="steps" if val_set_size > 0 else "no",
+        eval_steps=200 if val_set_size > 0 else None,
         # logging strategies
-        logging_dir=f"{output_dir}/logs",
+        logging_dir=f"{args.output_data_path}/logs",
         logging_strategy="steps",
         logging_steps=10,
         save_strategy="no",
@@ -205,7 +253,8 @@ def training_function(args):
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         data_collator=default_data_collator,
     )
 
@@ -215,43 +264,85 @@ def training_function(args):
         trainer.train(resume_from_checkpoint=last_checkpoint)
     else:
         trainer.train()
+    
+    if val_set_size > 0:
+        # evaluate model
+        eval_result = trainer.evaluate(eval_dataset=val_dataset)
 
+        # writes eval result to file which can be accessed later in s3 ouput
+        with open(os.path.join(args.output_data_path, "eval_results.txt"), "w") as writer:
+            print(f"***** Eval results *****")
+            for key, value in sorted(eval_result.items()):
+                writer.write(f"{key} = {value}\n")
+                print(f"{key} = {value}\n")
 
+    trainer.model.save_pretrained(output_dir, safe_serialization=False)
     sagemaker_save_dir="/opt/ml/model/"
-    if args.merge_weights:
-        # merge adapter weights with base model and save
-        # save int 4 model
-        trainer.model.save_pretrained(output_dir, safe_serialization=False)
-        # clear memory
-        del model
-        del trainer
-        torch.cuda.empty_cache()
+    trainer.model.save_pretrained(sagemaker_save_dir, safe_serialization=True)
+    # if args.merge_weights:
+    #     # merge adapter weights with base model and save
+    #     # save int 4 model
+    #     trainer.model.save_pretrained(output_dir, safe_serialization=False)
+    #     # clear memory
+    #     del model
+    #     del trainer
+    #     torch.cuda.empty_cache()
 
-        from peft import AutoPeftModelForCausalLM
+    #     from peft import AutoPeftModelForCausalLM
 
-        # load PEFT model in fp16
-        model = AutoPeftModelForCausalLM.from_pretrained(
-            output_dir,
-            low_cpu_mem_usage=True,
-            device_map="auto", # Added from 28_train_llms_with_qlora example
-            torch_dtype=torch.float16,
-            trust_remote_code=True, # Added from 28_train_llms_with_qlora example
-        )  
-        # Merge LoRA and base model and save
-        model = model.merge_and_unload()        
-        model.save_pretrained(
-            sagemaker_save_dir, safe_serialization=True, max_shard_size="2GB"
-        )
-    else:
-        trainer.model.save_pretrained(
-            sagemaker_save_dir, safe_serialization=True
-        )
+    #     # load PEFT model in fp16
+    #     model = AutoPeftModelForCausalLM.from_pretrained(
+    #         output_dir,
+    #         low_cpu_mem_usage=True,
+    #         device_map="auto", # Added from 28_train_llms_with_qlora example
+    #         torch_dtype=torch.float16,
+    #         trust_remote_code=True, # Added from 28_train_llms_with_qlora example
+    #     )  
+    #     # Merge LoRA and base model and save
+    #     model = model.merge_and_unload()        
+    #     model.save_pretrained(
+    #         sagemaker_save_dir, safe_serialization=True, max_shard_size="2GB"
+    #     )
+    # else:
+    #     print("NOT MERGING")
+    #     trainer.model.save_pretrained(
+    #         sagemaker_save_dir, safe_serialization=True
+    #     )
 
     # save tokenizer for easy inference
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     tokenizer.save_pretrained(sagemaker_save_dir)
 
+    # # copy inference script
+    # os.makedirs("/opt/ml/model/code", exist_ok=True)
+    # shutil.copyfile(
+    #     os.path.join(os.path.dirname(__file__), "inference.py"),
+    #     "/opt/ml/model/code/inference.py",
+    # )
+    # shutil.copyfile(
+    #     os.path.join(os.path.dirname(__file__), "requirements.txt"),
+    #     "/opt/ml/model/code/requirements.txt",
+    # )
 
+    print_files("/opt/ml/model")
+    print_files("/opt/ml/checkpoints")
+    print_files("/opt/ml/output")
+
+    # # import os
+    # import glob
+
+    # files = glob.glob('/opt/ml/model/*')
+    # for f in files:
+    #     os.remove(f)
+    # files = glob.glob('/opt/ml/checkpoints/*')
+    # print("Copying Files")
+    # for f in files:
+    #     # os.remove(f)
+    #     shutil.copyfile(
+    #         os.path.join('/opt/ml/checkpoints/', os.path.basename(f).split('/')[-1]),
+    #         os.path.join('/opt/ml/model/', os.path.basename(f).split('/')[-1])
+    #     )
+    
 def main():
     args = parse_arge()
     training_function(args)
@@ -259,3 +350,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
