@@ -8,11 +8,13 @@ from transformers import (
     BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
+    GPTQConfig,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_from_disk
 import torch
 import shutil
+
 
 import bitsandbytes as bnb
 from huggingface_hub import login, HfFolder
@@ -91,6 +93,13 @@ def parse_arge():
         default=0.1,
         help="LoRA Config - lora_r Value",
     )
+    
+    # Push to Hub Parameters
+    parser.add_argument("--push_to_hub", type=bool, default=True)
+    parser.add_argument("--hub_model_id", type=str, default=None)
+    parser.add_argument("--hub_strategy", type=str, default=None)
+    parser.add_argument("--hub_token", type=str, default=None)
+
     args, _ = parser.parse_known_args()
 
     if args.hf_token:
@@ -247,6 +256,11 @@ def training_function(args):
         logging_strategy="steps",
         logging_steps=10,
         save_strategy="no",
+        # push to hub parameters
+        push_to_hub=args.push_to_hub,
+        hub_strategy=args.hub_strategy,
+        hub_model_id=args.hub_model_id,
+        hub_token=args.hub_token,
     )
 
     # Create Trainer instance
@@ -259,7 +273,7 @@ def training_function(args):
     )
 
     if get_last_checkpoint(output_dir) is not None:
-        # logger.info("***** continue training *****")
+        print("***** continue training *****")
         last_checkpoint = get_last_checkpoint(output_dir)
         trainer.train(resume_from_checkpoint=last_checkpoint)
     else:
@@ -275,43 +289,85 @@ def training_function(args):
             for key, value in sorted(eval_result.items()):
                 writer.write(f"{key} = {value}\n")
                 print(f"{key} = {value}\n")
+    try:
+        trainer.create_model_card(model_name=args.hub_model_id)
+        trainer.push_to_hub()
+    except Exception as e:
+        print(f"Unable to Push to Hugging Face Hub. Err: {e}")
 
-    trainer.model.save_pretrained(output_dir, safe_serialization=False)
     sagemaker_save_dir="/opt/ml/model/"
-    trainer.model.save_pretrained(sagemaker_save_dir, safe_serialization=True)
-    # if args.merge_weights:
-    #     # merge adapter weights with base model and save
-    #     # save int 4 model
-    #     trainer.model.save_pretrained(output_dir, safe_serialization=False)
-    #     # clear memory
-    #     del model
-    #     del trainer
-    #     torch.cuda.empty_cache()
+    if args.merge_weights:
+        print("***MERGING***")
+        # merge adapter weights with base model and save
+        # save int 4 model
+        trainer.model.save_pretrained(output_dir, safe_serialization=False)
+        # clear memory
+        del model
+        del trainer
+        torch.cuda.empty_cache()
 
-    #     from peft import AutoPeftModelForCausalLM
+        from peft import AutoPeftModelForCausalLM
 
-    #     # load PEFT model in fp16
-    #     model = AutoPeftModelForCausalLM.from_pretrained(
-    #         output_dir,
-    #         low_cpu_mem_usage=True,
-    #         device_map="auto", # Added from 28_train_llms_with_qlora example
-    #         torch_dtype=torch.float16,
-    #         trust_remote_code=True, # Added from 28_train_llms_with_qlora example
-    #     )  
-    #     # Merge LoRA and base model and save
-    #     model = model.merge_and_unload()        
-    #     model.save_pretrained(
-    #         sagemaker_save_dir, safe_serialization=True, max_shard_size="2GB"
-    #     )
-    # else:
-    #     print("NOT MERGING")
-    #     trainer.model.save_pretrained(
-    #         sagemaker_save_dir, safe_serialization=True
-    #     )
+        # load PEFT model in fp16
+        model = AutoPeftModelForCausalLM.from_pretrained(
+            output_dir,
+            low_cpu_mem_usage=True,
+            device_map="auto", # Added from 28_train_llms_with_qlora example
+            torch_dtype=torch.float16,
+            trust_remote_code=True, # Added from 28_train_llms_with_qlora example
+        )  
+        # Merge LoRA and base model and save
+        model = model.merge_and_unload()        
+        model.save_pretrained(
+            sagemaker_save_dir, safe_serialization=True, max_shard_size="2GB"
+        )
+    else:
+        print("NOT MERGING")
+        trainer.model.save_pretrained(
+            sagemaker_save_dir, safe_serialization=True
+        )
 
     # save tokenizer for easy inference
+    print("***Retreiving & Saving Tokenizer***")
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     tokenizer.save_pretrained(sagemaker_save_dir)
+
+    # clear memory
+    # try:
+    #     print("***Starting to Clear Memory***")
+    #     if 'model' in locals():
+    #         print("Deleting model")
+    #         del model
+    #     if 'trainer' in locals():
+    #         print("Deleting trainer")
+    #         del trainer
+    #     print("Emptying Cuda Cache")
+    #     torch.cuda.empty_cache()
+    # except Exception as e:
+    #     print(f"***Failed to Clear Memory. Err: {e}***")
+    #     raise e
+
+    # print("***Quantizing Model with GPTQ***")
+    # python3 quant_autogptq.py /workspace/llama-30b /workspace/llama-30b-gptq wikitext --bits 4 --group_size 128 --desc_act 0  --dtype float16
+    # GPTQ(sagemaker_save_dir, "/workspace/gptq-model", args.hub_model_id, "wikitext", desc_act=0, group_size=128, bits=4, dtype="float16")
+    # quantization_config = GPTQConfig(
+    #     bits=4,
+    #     group_size=128,
+    #     dataset="c4",
+    #     desc_act=False,
+    # )
+    # quant_model = AutoModelForCausalLM.from_pretrained(sagemaker_save_dir, quantization_config=quantization_config, torch_dtype=torch.float16, device_map='auto')
+
+    try:
+        print("***Pushing Model to Hub***")
+        model.push_to_hub(model_name=args.hub_model_id)
+    except Exception as e:
+        print(f"Unable to Push to Hugging Face Hub. Err: {e}")
+    try:
+        print("***Pushing Tokenizer to Hub***")
+        tokenizer.push_to_hub(model_name=args.hub_model_id)
+    except Exception as e:
+        print(f"Unable to Push to Hugging Face Hub. Err: {e}")
 
     # # copy inference script
     # os.makedirs("/opt/ml/model/code", exist_ok=True)
@@ -325,15 +381,15 @@ def training_function(args):
     # )
 
     print_files("/opt/ml/model")
-    print_files("/opt/ml/checkpoints")
+    # print_files("/opt/ml/checkpoints")
     print_files("/opt/ml/output")
 
     # # import os
-    # import glob
+    import glob
 
-    # files = glob.glob('/opt/ml/model/*')
-    # for f in files:
-    #     os.remove(f)
+    files = glob.glob('/opt/ml/model/*')
+    for f in files:
+        os.remove(f)
     # files = glob.glob('/opt/ml/checkpoints/*')
     # print("Copying Files")
     # for f in files:
@@ -345,7 +401,18 @@ def training_function(args):
     
 def main():
     args = parse_arge()
-    training_function(args)
+    try:
+        training_function(args)
+    except Exception as e:
+        print(f"***training_function() FAILED - Removing Model***")
+        print(f"Error: {e}")
+
+        import glob
+        files = glob.glob('/opt/ml/model/*')
+        for f in files:
+            os.remove(f)
+        
+        raise e
 
 
 if __name__ == "__main__":
