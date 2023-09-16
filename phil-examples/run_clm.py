@@ -249,8 +249,8 @@ def training_function(args):
         num_train_epochs=args.epochs,
         gradient_checkpointing=args.gradient_checkpointing,
         # adding evaluation to model
-        evaluation_strategy="steps" if val_set_size > 0 else "no",
-        eval_steps=200 if val_set_size > 0 else None,
+        # evaluation_strategy="steps" if val_set_size > 0 else "no",
+        # eval_steps=200 if val_set_size > 0 else None,
         # logging strategies
         logging_dir=f"{args.output_data_path}/logs",
         logging_strategy="steps",
@@ -268,7 +268,7 @@ def training_function(args):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset,
+        # eval_dataset=val_dataset,
         data_collator=default_data_collator,
     )
 
@@ -321,6 +321,12 @@ def training_function(args):
         model.save_pretrained(
             sagemaker_save_dir, safe_serialization=True, max_shard_size="2GB"
         )
+
+        try:
+            print("***Pushing Model to Hub***")
+            model.push_to_hub(repo_id=args.hub_model_id)
+        except Exception as e:
+            print(f"Unable to Push to Hugging Face Hub. Err: {e}")
     else:
         print("NOT MERGING")
         trainer.model.save_pretrained(
@@ -332,40 +338,9 @@ def training_function(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     tokenizer.save_pretrained(sagemaker_save_dir)
 
-    # clear memory
-    # try:
-    #     print("***Starting to Clear Memory***")
-    #     if 'model' in locals():
-    #         print("Deleting model")
-    #         del model
-    #     if 'trainer' in locals():
-    #         print("Deleting trainer")
-    #         del trainer
-    #     print("Emptying Cuda Cache")
-    #     torch.cuda.empty_cache()
-    # except Exception as e:
-    #     print(f"***Failed to Clear Memory. Err: {e}***")
-    #     raise e
-
-    # print("***Quantizing Model with GPTQ***")
-    # python3 quant_autogptq.py /workspace/llama-30b /workspace/llama-30b-gptq wikitext --bits 4 --group_size 128 --desc_act 0  --dtype float16
-    # GPTQ(sagemaker_save_dir, "/workspace/gptq-model", args.hub_model_id, "wikitext", desc_act=0, group_size=128, bits=4, dtype="float16")
-    # quantization_config = GPTQConfig(
-    #     bits=4,
-    #     group_size=128,
-    #     dataset="c4",
-    #     desc_act=False,
-    # )
-    # quant_model = AutoModelForCausalLM.from_pretrained(sagemaker_save_dir, quantization_config=quantization_config, torch_dtype=torch.float16, device_map='auto')
-
-    try:
-        print("***Pushing Model to Hub***")
-        model.push_to_hub(model_name=args.hub_model_id)
-    except Exception as e:
-        print(f"Unable to Push to Hugging Face Hub. Err: {e}")
     try:
         print("***Pushing Tokenizer to Hub***")
-        tokenizer.push_to_hub(model_name=args.hub_model_id)
+        tokenizer.push_to_hub(repo_id=args.hub_model_id)
     except Exception as e:
         print(f"Unable to Push to Hugging Face Hub. Err: {e}")
 
