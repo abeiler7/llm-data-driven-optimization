@@ -15,6 +15,8 @@ from datasets import load_from_disk
 import torch
 import shutil
 
+import data_prep
+
 
 import bitsandbytes as bnb
 from huggingface_hub import login, HfFolder
@@ -30,10 +32,13 @@ def parse_arge():
         help="Model id to use for training.",
     )
     parser.add_argument(
-        "--train_dataset_path", type=str, default="lm_dataset", help="Path to training dataset."
+        "--dataset", type=str, default=None, help="HuggingFace Dataset ID"
     )
     parser.add_argument(
-        "--val_dataset_path", type=str, default="lm_dataset", help="Path to validation dataset."
+        "--train_dataset_path", type=str, default=None, help="Path to training dataset."
+    )
+    parser.add_argument(
+        "--val_dataset_path", type=str, default=None, help="Path to validation dataset."
     )
     parser.add_argument(
         "--output_data_path", type=str, default="lm_dataset", help="Path to store output data."
@@ -214,9 +219,15 @@ def training_function(args):
     # set seed
     set_seed(args.seed)
 
-    train_dataset = load_from_disk(args.train_dataset_path)
-    val_dataset = load_from_disk(args.val_dataset_path)
-    val_set_size = len(val_dataset)
+    if args.dataset:
+        train_dataset = data_prep.data_prep(args.dataset)
+        # train_dataset = data["train"]
+        # val_dataset = data["val"]
+    else:
+        train_dataset = load_from_disk(args.train_dataset_path)
+        # val_dataset = load_from_disk(args.val_dataset_path)
+
+    # val_set_size = len(val_dataset)
     # load model from the hub with a bnb config
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -279,16 +290,16 @@ def training_function(args):
     else:
         trainer.train()
     
-    if val_set_size > 0:
-        # evaluate model
-        eval_result = trainer.evaluate(eval_dataset=val_dataset)
+    # if val_set_size > 0:
+    #     # evaluate model
+    #     eval_result = trainer.evaluate(eval_dataset=val_dataset)
 
-        # writes eval result to file which can be accessed later in s3 ouput
-        with open(os.path.join(args.output_data_path, "eval_results.txt"), "w") as writer:
-            print(f"***** Eval results *****")
-            for key, value in sorted(eval_result.items()):
-                writer.write(f"{key} = {value}\n")
-                print(f"{key} = {value}\n")
+    #     # writes eval result to file which can be accessed later in s3 ouput
+    #     with open(os.path.join(args.output_data_path, "eval_results.txt"), "w") as writer:
+    #         print(f"***** Eval results *****")
+    #         for key, value in sorted(eval_result.items()):
+    #             writer.write(f"{key} = {value}\n")
+    #             print(f"{key} = {value}\n")
     try:
         trainer.create_model_card(model_name=args.hub_model_id)
         trainer.push_to_hub()
