@@ -11,10 +11,8 @@ def format_goat(sample):
     return f"<s>[INST] {sample['instruction']} [/INST] {sample['output']}</s>"
 
 
-
 def generate_and_tokenize_prompt(data_point):
         full_prompt = format_goat(data_point)
-        # print(f"Full Prompt: {full_prompt}")
         tokenized_full_prompt = tokenizer(full_prompt)
         return tokenized_full_prompt
 
@@ -48,33 +46,14 @@ def chunk(sample, chunk_length=2048):
     result["labels"] = result["input_ids"].copy()
     return result
 
-def data_prep(dataset_id):
-    dataset = load_dataset(dataset_id, split="train")
-
-    # train_val = dataset.train_test_split(
-    #     test_size=0.15, shuffle=True, seed=42
-    # )
+def data_prep(dataset_id, rev="master"):
+    dataset = load_dataset(dataset_id, split="train", revision=rev)
 
     model_id = "meta-llama/Llama-2-7b-hf"
 
     global tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_auth_token=True)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # train_data = (
-    #     train_val["train"].map(
-    #         generate_and_tokenize_prompt, remove_columns=list(dataset.features)
-    #     ).map(
-    #         partial(chunk, chunk_length=2048), batched=True,
-    #     )
-    # )
-    # val_data = (
-    #     train_val["test"].map(
-    #         generate_and_tokenize_prompt, remove_columns=list(dataset.features)
-    #     ).map(
-    #         partial(chunk, chunk_length=2048), batched=True,
-    #     )
-    # )
+    tokenizer.pad_token = tokenizer.e
 
     train_data = dataset.map(
             generate_and_tokenize_prompt, remove_columns=list(dataset.features)

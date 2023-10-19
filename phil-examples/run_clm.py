@@ -8,15 +8,12 @@ from transformers import (
     BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
-    GPTQConfig,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_from_disk
 import torch
-import shutil
 
 import data_prep
-
 
 import bitsandbytes as bnb
 from huggingface_hub import login, HfFolder
@@ -33,6 +30,9 @@ def parse_arge():
     )
     parser.add_argument(
         "--dataset", type=str, default=None, help="HuggingFace Dataset ID"
+    )
+    parser.add_argument(
+        "--data_rev", type=str, default="master", help="HuggingFace Dataset Branch Name"
     )
     parser.add_argument(
         "--train_dataset_path", type=str, default=None, help="Path to training dataset."
@@ -167,8 +167,6 @@ def create_peft_model(model, args, gradient_checkpointing=True, bf16=True):
         model.gradient_checkpointing_enable()
 
     # get lora target modules
-    # modules = find_all_linear_names(model)
-    # print(f"Found {len(modules)} modules to quantize: {modules}")
     lora_modules = ["q_proj","v_proj","k_proj","o_proj",]
 
     peft_config = LoraConfig(
@@ -198,7 +196,6 @@ def create_peft_model(model, args, gradient_checkpointing=True, bf16=True):
     return model
 
 def print_files(path):
-    # import python modules
     import os
     print(f"*** {path} ***")
     # Get list of all files only in the given directory
@@ -220,14 +217,12 @@ def training_function(args):
     set_seed(args.seed)
 
     if args.dataset:
-        train_dataset = data_prep.data_prep(args.dataset)
-        # train_dataset = data["train"]
-        # val_dataset = data["val"]
+        train_dataset = data_prep.data_prep(args.dataset, args.data_rev)
     else:
         train_dataset = load_from_disk(args.train_dataset_path)
-        # val_dataset = load_from_disk(args.val_dataset_path)
+    
+    print_files("/opt/ml")
 
-    # val_set_size = len(val_dataset)
     # load model from the hub with a bnb config
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -259,9 +254,6 @@ def training_function(args):
         learning_rate=args.lr,
         num_train_epochs=args.epochs,
         gradient_checkpointing=args.gradient_checkpointing,
-        # adding evaluation to model
-        # evaluation_strategy="steps" if val_set_size > 0 else "no",
-        # eval_steps=200 if val_set_size > 0 else None,
         # logging strategies
         logging_dir=f"{args.output_data_path}/logs",
         logging_strategy="steps",
@@ -279,7 +271,6 @@ def training_function(args):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        # eval_dataset=val_dataset,
         data_collator=default_data_collator,
     )
 
@@ -290,16 +281,7 @@ def training_function(args):
     else:
         trainer.train()
     
-    # if val_set_size > 0:
-    #     # evaluate model
-    #     eval_result = trainer.evaluate(eval_dataset=val_dataset)
-
-    #     # writes eval result to file which can be accessed later in s3 ouput
-    #     with open(os.path.join(args.output_data_path, "eval_results.txt"), "w") as writer:
-    #         print(f"***** Eval results *****")
-    #         for key, value in sorted(eval_result.items()):
-    #             writer.write(f"{key} = {value}\n")
-    #             print(f"{key} = {value}\n")
+    # push trainer to HFHub & create Model Card
     try:
         trainer.create_model_card(model_name=args.hub_model_id)
         trainer.push_to_hub()
@@ -355,35 +337,11 @@ def training_function(args):
     except Exception as e:
         print(f"Unable to Push to Hugging Face Hub. Err: {e}")
 
-    # # copy inference script
-    # os.makedirs("/opt/ml/model/code", exist_ok=True)
-    # shutil.copyfile(
-    #     os.path.join(os.path.dirname(__file__), "inference.py"),
-    #     "/opt/ml/model/code/inference.py",
-    # )
-    # shutil.copyfile(
-    #     os.path.join(os.path.dirname(__file__), "requirements.txt"),
-    #     "/opt/ml/model/code/requirements.txt",
-    # )
-
-    print_files("/opt/ml/model")
-    # print_files("/opt/ml/checkpoints")
-    print_files("/opt/ml/output")
-
-    # # import os
+    # Remove model file to prevent saving to S3
     import glob
-
     files = glob.glob('/opt/ml/model/*')
     for f in files:
         os.remove(f)
-    # files = glob.glob('/opt/ml/checkpoints/*')
-    # print("Copying Files")
-    # for f in files:
-    #     # os.remove(f)
-    #     shutil.copyfile(
-    #         os.path.join('/opt/ml/checkpoints/', os.path.basename(f).split('/')[-1]),
-    #         os.path.join('/opt/ml/model/', os.path.basename(f).split('/')[-1])
-    #     )
     
 def main():
     args = parse_arge()
@@ -393,6 +351,7 @@ def main():
         print(f"***training_function() FAILED - Removing Model***")
         print(f"Error: {e}")
 
+        # Remove model file to prevent saving to S3
         import glob
         files = glob.glob('/opt/ml/model/*')
         for f in files:
