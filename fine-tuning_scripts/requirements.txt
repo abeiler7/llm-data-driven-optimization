@@ -5,5 +5,4 @@ bitsandbytes==0.40.2
 safetensors==0.3.3
 tokenizers==0.13.3
 sagemaker-training==4.7.0
-auto-gptq==0.4.2
-optimum
+datasets==2.14.5

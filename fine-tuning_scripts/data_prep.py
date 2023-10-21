@@ -53,7 +53,7 @@ def data_prep(dataset_id, rev="master"):
 
     global tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_auth_token=True)
-    tokenizer.pad_token = tokenizer.e
+    tokenizer.pad_token = tokenizer.eos_token
 
     train_data = dataset.map(
             generate_and_tokenize_prompt, remove_columns=list(dataset.features)
@@ -61,4 +61,4 @@ def data_prep(dataset_id, rev="master"):
             partial(chunk, chunk_length=2048), batched=True,
         )
 
-    return train_data #{"train": train_data} #, "val": val_data}
+    return train_data

@@ -1,0 +1,4 @@
+ipykernel==6.25.2
+num2words==0.5.13
+sagemaker==2.194.0
+python-telegram-bot==20.5
